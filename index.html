@@ -222,6 +222,7 @@
     .file-row__btn:disabled { color: var(--btn-disabled); cursor: not-allowed; }
 
     .pdf-viewer {
+        position: relative;
         margin-top: 10px;
         padding: 12px;
         border: 1px solid var(--card-border);
@@ -244,6 +245,60 @@
         padding: 16px;
         color: var(--muted);
         font-size: 14px;
+    }
+    .pdf-viewer__toolbar {
+        position: sticky;
+        top: -12px;
+        z-index: 2;
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+        margin: -12px -12px 8px;
+        padding: 8px 12px;
+        background: rgba(243, 244, 246, 0.92);
+        backdrop-filter: blur(4px);
+        border-bottom: 1px solid var(--card-border);
+        border-top-left-radius: 8px;
+        border-top-right-radius: 8px;
+    }
+    .pdf-viewer__btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        background: #fff;
+        border: 1px solid var(--btn-border);
+        border-radius: 6px;
+        padding: 5px 12px;
+        font-size: 13px;
+        cursor: pointer;
+        font-family: inherit;
+        color: var(--text);
+    }
+    .pdf-viewer__btn:hover { background: #f9fafb; }
+
+    .pdf-viewer:fullscreen {
+        max-height: none;
+        height: 100vh;
+        border-radius: 0;
+        background: #525659;
+        padding: 24px;
+        margin: 0;
+    }
+    .pdf-viewer:fullscreen .pdf-viewer__toolbar {
+        background: rgba(34, 36, 38, 0.85);
+        border: 1px solid #3a3c3f;
+        border-radius: 8px;
+        margin: 0 auto 16px;
+        max-width: 1100px;
+    }
+    .pdf-viewer:fullscreen .pdf-viewer__btn {
+        background: #fff;
+    }
+    .pdf-viewer:fullscreen .pdf-viewer__page {
+        max-width: min(1100px, 95%) !important;
+    }
+    .pdf-viewer:fullscreen .pdf-viewer__status {
+        color: #d1d5db;
     }
 
     @media (max-width: 480px) {
@@ -440,11 +495,14 @@
         return Promise.resolve();
     }
 
-    // Vykreslí jednu PDF stránku na <canvas> v zadanej šírke (px).
+    // Vykreslí jednu PDF stránku na <canvas>. Renderujeme v dostatočne vysokom
+    // rozlíšení, aby PDF zostal ostrý aj keď ho CSS zväčší (napr. v režime
+    // celej obrazovky kde sa zobrazuje až do ~1100px šírky).
     function renderPdfPage(page, targetWidth) {
         var unscaled = page.getViewport({ scale: 1 });
-        var scale = Math.max(0.5, targetWidth / unscaled.width);
-        // retina/HiDPI ostrosť
+        // renderuj na min. 1100px šírky (kvôli fullscreen), inak na šírku viewer-u
+        var renderWidth = Math.max(targetWidth, 1100);
+        var scale = Math.max(0.5, renderWidth / unscaled.width);
         var dpr = Math.min(window.devicePixelRatio || 1, 2);
         var viewport = page.getViewport({ scale: scale });
 
@@ -452,8 +510,11 @@
         canvas.className = 'pdf-viewer__page';
         canvas.width = Math.floor(viewport.width * dpr);
         canvas.height = Math.floor(viewport.height * dpr);
-        canvas.style.width = viewport.width + 'px';
-        canvas.style.height = viewport.height + 'px';
+        // Šírku riadime cez CSS max-width (v normálnom móde targetWidth, vo fullscreen 1100px).
+        // `width:100%` + `height:auto` zaisťuje, že canvas zachová pomer strán.
+        canvas.style.maxWidth = targetWidth + 'px';
+        canvas.style.width = '100%';
+        canvas.style.height = 'auto';
 
         var ctx = canvas.getContext('2d');
         var renderTask = page.render({
@@ -462,6 +523,45 @@
             transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : null
         });
         return { canvas: canvas, promise: renderTask.promise };
+    }
+
+    function fullscreenSvg() {
+        return '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3M21 8V5a2 2 0 0 0-2-2h-3M3 16v3a2 2 0 0 0 2 2h3M16 21h3a2 2 0 0 0 2-2v-3"/></svg>';
+    }
+    function exitFullscreenSvg() {
+        return '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7"/></svg>';
+    }
+
+    function buildPdfToolbar(viewer) {
+        var bar = document.createElement('div');
+        bar.className = 'pdf-viewer__toolbar';
+        var fsBtn = document.createElement('button');
+        fsBtn.type = 'button';
+        fsBtn.className = 'pdf-viewer__btn js-pdf-fullscreen';
+        fsBtn.innerHTML = fullscreenSvg() + '<span>Celá obrazovka</span>';
+        bar.appendChild(fsBtn);
+
+        function syncFsLabel() {
+            var isFs = document.fullscreenElement === viewer;
+            fsBtn.innerHTML = (isFs ? exitFullscreenSvg() : fullscreenSvg()) +
+                              '<span>' + (isFs ? 'Zavřít celou obrazovku' : 'Celá obrazovka') + '</span>';
+        }
+        document.addEventListener('fullscreenchange', syncFsLabel);
+        return bar;
+    }
+
+    function toggleViewerFullscreen(viewer) {
+        if (document.fullscreenElement === viewer) {
+            if (document.exitFullscreen) document.exitFullscreen();
+            return;
+        }
+        if (!viewer.requestFullscreen) {
+            alert('Tento prohlížeč nepodporuje režim celé obrazovky.');
+            return;
+        }
+        viewer.requestFullscreen().catch(function (err) {
+            alert('Nepodařilo se přepnout do režimu celé obrazovky (' + (err && err.message ? err.message : err) + ').');
+        });
     }
 
     function openPdfInline(fileRow) {
@@ -500,6 +600,7 @@
             })
             .then(function (pdf) {
                 viewer.innerHTML = '';
+                viewer.appendChild(buildPdfToolbar(viewer));
                 var targetWidth = Math.max(280, viewer.clientWidth - 24);
                 var chain = Promise.resolve();
                 var loaded = 0;
@@ -641,6 +742,12 @@
         if (openBtn) {
             ev.preventDefault();
             openPdfInline(openBtn.closest('.file-row'));
+            return;
+        }
+        var fsBtn = ev.target.closest && ev.target.closest('.js-pdf-fullscreen');
+        if (fsBtn) {
+            ev.preventDefault();
+            toggleViewerFullscreen(fsBtn.closest('.pdf-viewer'));
             return;
         }
     });
