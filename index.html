@@ -284,6 +284,37 @@
         if (page < totalPages) { page++; render(); window.scrollTo({ top: 0, behavior: 'smooth' }); }
     });
 
+    // Robustné otváranie detailu — keď je widget v iframe (napr. embed na obeckadov.cz),
+    // samotný target="_blank" niekedy zlyhá (sandbox bez allow-popups, prísny adblocker,
+    // tracking-protection v Brave/Safari). Fallbacky zaisťujú, že detail Imunis sa
+    // nikdy nepokúsi naloadovať vo vnútri rozbitého iframe kontextu, čo je príčinou
+    // chyby "Unsafe attempt to load URL ... from frame with URL chrome-error://".
+    function openDetail(url) {
+        // 1) skúsiť novú kartu (preferované UX — používateľ neopustí materskú stránku)
+        try {
+            var w = window.open(url, '_blank', 'noopener');
+            if (w) { try { w.opener = null; } catch (_) {} return; }
+        } catch (_) {}
+        // 2) ak sandbox blokuje popups, vyhodiť používateľa z iframe na top-level
+        try {
+            if (window.top && window.top !== window.self) {
+                window.top.location.href = url;
+                return;
+            }
+        } catch (_) {}
+        // 3) posledná inštancia — navigovať aktuálne okno
+        window.location.href = url;
+    }
+
+    $list.addEventListener('click', function (ev) {
+        var a = ev.target.closest ? ev.target.closest('a.item__link') : null;
+        if (!a) return;
+        // ctrl/cmd/middle-click → nechaj browseru pôvodné správanie (otvorenie v novej karte)
+        if (ev.ctrlKey || ev.metaKey || ev.shiftKey || ev.button === 1) return;
+        ev.preventDefault();
+        openDetail(a.getAttribute('href'));
+    });
+
     fetch(FEED_URL, { cache: 'no-store' })
         .then(function (r) {
             if (!r.ok) throw new Error('HTTP ' + r.status);
