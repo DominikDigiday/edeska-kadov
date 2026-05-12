@@ -138,10 +138,105 @@
     }
     .state--error { color: #b91c1c; }
 
+    .item__toggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        background: transparent;
+        border: 1px solid var(--btn-border);
+        border-radius: 8px;
+        padding: 6px 12px;
+        font-size: 14px;
+        color: var(--link);
+        cursor: pointer;
+        font-family: inherit;
+    }
+    .item__toggle:hover { background: #f9fafb; }
+    .item__toggle[aria-expanded="true"] svg { transform: rotate(180deg); }
+    .item__toggle svg { transition: transform .15s ease; }
+
+    .detail {
+        margin-top: 14px;
+        border-top: 1px solid var(--card-border);
+        padding-top: 14px;
+    }
+    .detail__loading,
+    .detail__error {
+        font-size: 14px;
+        color: var(--muted);
+    }
+    .detail__error { color: #b91c1c; }
+    .detail__meta {
+        display: grid;
+        grid-template-columns: max-content 1fr;
+        gap: 6px 14px;
+        font-size: 14px;
+        margin-bottom: 12px;
+    }
+    .detail__meta dt { color: var(--muted); }
+    .detail__meta dd { margin: 0; color: var(--text); }
+    .detail__desc {
+        font-size: 14px;
+        margin: 0 0 12px;
+        white-space: pre-wrap;
+    }
+    .detail__files-title {
+        font-size: 14px;
+        font-weight: 600;
+        margin: 8px 0 6px;
+    }
+    .detail__files {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+    }
+    .file-row {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 10px;
+        background: #f9fafb;
+        border: 1px solid var(--card-border);
+        border-radius: 8px;
+        font-size: 14px;
+    }
+    .file-row__label { font-weight: 600; }
+    .file-row__meta { color: var(--muted); font-size: 13px; }
+    .file-row__spacer { flex: 1; }
+    .file-row__btn {
+        background: transparent;
+        border: 1px solid var(--btn-border);
+        border-radius: 6px;
+        padding: 4px 10px;
+        font-size: 13px;
+        cursor: pointer;
+        font-family: inherit;
+        color: var(--text);
+    }
+    .file-row__btn:hover { background: #fff; }
+    .file-row__btn:disabled { color: var(--btn-disabled); cursor: not-allowed; }
+
+    .pdf-viewer {
+        margin-top: 10px;
+        width: 100%;
+        height: 70vh;
+        min-height: 480px;
+        border: 1px solid var(--card-border);
+        border-radius: 8px;
+        background: #fff;
+    }
+
     @media (max-width: 480px) {
         .edeska { padding: 10px; }
         .item { padding: 14px 16px; }
         .pager { flex-wrap: wrap; gap: 10px; justify-content: center; }
+        .detail__meta { grid-template-columns: 1fr; gap: 2px; margin-bottom: 10px; }
+        .detail__meta dt { color: var(--muted); margin-top: 6px; }
+        .pdf-viewer { height: 60vh; }
     }
 </style>
 </head>
@@ -232,11 +327,176 @@
         return '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>';
     }
 
-    function externalSvg() {
-        return '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>';
+    function chevronSvg() {
+        return '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>';
+    }
+
+    function absoluteImunisUrl(href) {
+        if (/^https?:\/\//i.test(href)) return href;
+        if (href.charAt(0) === '/') return 'https://kadov.imunis.cz' + href;
+        return 'https://kadov.imunis.cz/edeska/' + href;
+    }
+
+    // Parsuje HTML detail-stránky z Imunis a vyťahuje metadáta + prílohy.
+    // Štruktúra: <table class="edeska table detail"><tbody><tr><th>Kľúč</th><td>Hodnota|<a href="/edeska/file?id=...">Štítok</a> (typ, veľkosť)</td></tr>...
+    function parseDetailHtml(html) {
+        var doc = new DOMParser().parseFromString(html, 'text/html');
+        var meta = [];
+        var files = [];
+        var description = '';
+
+        var rows = doc.querySelectorAll('table.detail tbody tr');
+        var currentKey = '';
+        rows.forEach(function (tr) {
+            var th = tr.querySelector('th');
+            var td = tr.querySelector('td');
+            if (!td) return;
+            if (th) currentKey = th.textContent.replace(/\s+/g, ' ').trim();
+
+            var anchors = td.querySelectorAll('a[href*="/edeska/file"]');
+            if (anchors.length) {
+                anchors.forEach(function (a) {
+                    var sizeNode = a.nextElementSibling;
+                    var sizeText = sizeNode ? sizeNode.textContent.replace(/[()]/g, ' ').replace(/\s+/g, ' ').trim() : '';
+                    files.push({
+                        label: a.textContent.trim(),
+                        url:   absoluteImunisUrl(a.getAttribute('href')),
+                        info:  sizeText
+                    });
+                });
+                return;
+            }
+
+            var value = td.textContent.replace(/\s+/g, ' ').trim();
+            if (!value) return;
+            if (currentKey === 'Popis') {
+                description = value;
+                return;
+            }
+            // Vynechaj veci, ktoré používateľ nepotrebuje pri inline detaile
+            if (currentKey === 'Značka' || currentKey === 'Verze' || currentKey === 'Stav') return;
+            meta.push({ key: currentKey, value: value });
+        });
+
+        return { meta: meta, files: files, description: description };
+    }
+
+    function renderDetail(container, data) {
+        var html = '';
+        if (data.meta.length) {
+            html += '<dl class="detail__meta">';
+            for (var i = 0; i < data.meta.length; i++) {
+                html += '<dt>' + escapeHtml(data.meta[i].key) + '</dt>' +
+                        '<dd>' + escapeHtml(data.meta[i].value) + '</dd>';
+            }
+            html += '</dl>';
+        }
+        if (data.description) {
+            html += '<p class="detail__desc">' + escapeHtml(data.description) + '</p>';
+        }
+        if (data.files.length) {
+            html += '<div class="detail__files-title">Přílohy</div>';
+            html += '<ul class="detail__files">';
+            for (var j = 0; j < data.files.length; j++) {
+                var f = data.files[j];
+                html += '<li class="file-row" data-file-url="' + escapeHtml(f.url) + '">' +
+                          '<span class="file-row__label">' + escapeHtml(f.label) + '</span>' +
+                          (f.info ? '<span class="file-row__meta">' + escapeHtml(f.info) + '</span>' : '') +
+                          '<span class="file-row__spacer"></span>' +
+                          '<button type="button" class="file-row__btn js-open-pdf">Otevřít</button>' +
+                        '</li>';
+            }
+            html += '</ul>';
+        }
+        if (!data.meta.length && !data.description && !data.files.length) {
+            html = '<div class="detail__error">Detail se nepodařilo přečíst.</div>';
+        }
+        container.innerHTML = html;
+    }
+
+    // Aktívne blob URLs — pri zrušení/zatvorení detailu ich uvoľníme, aby sme nedržali pamäť.
+    var blobUrls = [];
+
+    function openPdfInline(fileRow) {
+        var url = fileRow.getAttribute('data-file-url');
+        if (!url) return;
+        var btn = fileRow.querySelector('.js-open-pdf');
+        if (btn) { btn.disabled = true; btn.textContent = 'Načítám…'; }
+
+        var existing = fileRow.nextElementSibling;
+        if (existing && existing.classList && existing.classList.contains('pdf-viewer')) {
+            // toggle: druhý klik zatvorí
+            existing.parentNode.removeChild(existing);
+            if (btn) { btn.disabled = false; btn.textContent = 'Otevřít'; }
+            return;
+        }
+
+        fetch(url, { cache: 'no-store' })
+            .then(function (r) {
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                return r.blob();
+            })
+            .then(function (blob) {
+                var blobUrl = URL.createObjectURL(blob);
+                blobUrls.push(blobUrl);
+                var iframe = document.createElement('iframe');
+                iframe.className = 'pdf-viewer';
+                iframe.src = blobUrl;
+                iframe.title = 'Náhled PDF';
+                fileRow.parentNode.insertBefore(iframe, fileRow.nextSibling);
+                if (btn) { btn.disabled = false; btn.textContent = 'Skrýt'; }
+            })
+            .catch(function (err) {
+                var errEl = document.createElement('div');
+                errEl.className = 'detail__error';
+                errEl.style.marginTop = '8px';
+                errEl.textContent = 'Přílohu se nepodařilo načíst (' + err.message + ').';
+                fileRow.parentNode.insertBefore(errEl, fileRow.nextSibling);
+                if (btn) { btn.disabled = false; btn.textContent = 'Otevřít'; }
+            });
+    }
+
+    function revokeBlobUrlsIn(container) {
+        var iframes = container.querySelectorAll('iframe.pdf-viewer');
+        iframes.forEach(function (f) {
+            try { URL.revokeObjectURL(f.src); } catch (_) {}
+        });
+    }
+
+    function toggleDetail(item) {
+        var btn = item.querySelector('.item__toggle');
+        var existing = item.querySelector(':scope > .detail');
+        if (existing) {
+            revokeBlobUrlsIn(existing);
+            existing.parentNode.removeChild(existing);
+            if (btn) btn.setAttribute('aria-expanded', 'false');
+            return;
+        }
+
+        var detailUrl = btn.getAttribute('data-detail-url');
+        if (!detailUrl) return;
+
+        var wrap = document.createElement('div');
+        wrap.className = 'detail';
+        wrap.innerHTML = '<div class="detail__loading">Načítám detail…</div>';
+        item.appendChild(wrap);
+        if (btn) btn.setAttribute('aria-expanded', 'true');
+
+        fetch(detailUrl, { cache: 'no-store' })
+            .then(function (r) {
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                return r.text();
+            })
+            .then(function (html) {
+                renderDetail(wrap, parseDetailHtml(html));
+            })
+            .catch(function (err) {
+                wrap.innerHTML = '<div class="detail__error">Detail se nepodařilo načíst (' + err.message + ').</div>';
+            });
     }
 
     function render() {
+        revokeBlobUrlsIn($list);
         var totalPages = Math.max(1, Math.ceil(items.length / PER_PAGE));
         if (page > totalPages) page = totalPages;
 
@@ -264,7 +524,7 @@
                       '</div>' +
                       '<h3 class="item__title">' + escapeHtml(it.title) + '</h3>' +
                       (it.link
-                        ? '<a class="item__link" href="' + encodeURI(it.link) + '" target="_blank" rel="noopener">Zobrazit detail ' + externalSvg() + '</a>'
+                        ? '<button type="button" class="item__toggle js-toggle-detail" aria-expanded="false" data-detail-url="' + escapeHtml(it.link) + '">Zobrazit detail ' + chevronSvg() + '</button>'
                         : '') +
                     '</article>';
         }
@@ -284,35 +544,26 @@
         if (page < totalPages) { page++; render(); window.scrollTo({ top: 0, behavior: 'smooth' }); }
     });
 
-    // Robustné otváranie detailu — keď je widget v iframe (napr. embed na obeckadov.cz),
-    // samotný target="_blank" niekedy zlyhá (sandbox bez allow-popups, prísny adblocker,
-    // tracking-protection v Brave/Safari). Fallbacky zaisťujú, že detail Imunis sa
-    // nikdy nepokúsi naloadovať vo vnútri rozbitého iframe kontextu, čo je príčinou
-    // chyby "Unsafe attempt to load URL ... from frame with URL chrome-error://".
-    function openDetail(url) {
-        // 1) skúsiť novú kartu (preferované UX — používateľ neopustí materskú stránku)
-        try {
-            var w = window.open(url, '_blank', 'noopener');
-            if (w) { try { w.opener = null; } catch (_) {} return; }
-        } catch (_) {}
-        // 2) ak sandbox blokuje popups, vyhodiť používateľa z iframe na top-level
-        try {
-            if (window.top && window.top !== window.self) {
-                window.top.location.href = url;
-                return;
-            }
-        } catch (_) {}
-        // 3) posledná inštancia — navigovať aktuálne okno
-        window.location.href = url;
-    }
-
+    // Všetko sa zobrazuje INLINE v rámci widgetu — detail aj PDF prílohy.
+    // Dôvod: widget je embedovaný cez <iframe sandbox="..."> v QARO bez
+    // allow-popups-to-escape-sandbox / allow-downloads, takže otvorenie
+    // novej karty alebo download navigácia končí ERR_BLOCKED_BY_CLIENT.
+    // Imunis posiela access-control-allow-origin: * na všetkých endpointoch
+    // (feed, detail, file), takže si všetko stiahneme cez fetch a PDF zobrazíme
+    // ako blob URL v nested iframe (blob: je same-origin → sandbox nezasahuje).
     $list.addEventListener('click', function (ev) {
-        var a = ev.target.closest ? ev.target.closest('a.item__link') : null;
-        if (!a) return;
-        // ctrl/cmd/middle-click → nechaj browseru pôvodné správanie (otvorenie v novej karte)
-        if (ev.ctrlKey || ev.metaKey || ev.shiftKey || ev.button === 1) return;
-        ev.preventDefault();
-        openDetail(a.getAttribute('href'));
+        var toggle = ev.target.closest && ev.target.closest('.js-toggle-detail');
+        if (toggle) {
+            ev.preventDefault();
+            toggleDetail(toggle.closest('.item'));
+            return;
+        }
+        var openBtn = ev.target.closest && ev.target.closest('.js-open-pdf');
+        if (openBtn) {
+            ev.preventDefault();
+            openPdfInline(openBtn.closest('.file-row'));
+            return;
+        }
     });
 
     fetch(FEED_URL, { cache: 'no-store' })
