@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Úřední deska</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js" integrity="sha512-q+4liFwdPC/bNdhUpZx6aXDx/h77yEQtn4I1slHydcbZK34nLaR3cAeYSJshoxIOq3mjEf7xJE8YWIUHMn+oCQ==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 <style>
     :root {
         --bg: transparent;
@@ -222,12 +223,27 @@
 
     .pdf-viewer {
         margin-top: 10px;
-        width: 100%;
-        height: 70vh;
-        min-height: 480px;
+        padding: 12px;
         border: 1px solid var(--card-border);
         border-radius: 8px;
+        background: #f3f4f6;
+        max-height: 75vh;
+        overflow-y: auto;
+    }
+    .pdf-viewer__page {
+        display: block;
+        margin: 0 auto 10px;
+        max-width: 100%;
+        height: auto;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
         background: #fff;
+    }
+    .pdf-viewer__page:last-child { margin-bottom: 0; }
+    .pdf-viewer__status {
+        text-align: center;
+        padding: 16px;
+        color: var(--muted);
+        font-size: 14px;
     }
 
     @media (max-width: 480px) {
@@ -414,53 +430,116 @@
         container.innerHTML = html;
     }
 
-    // Aktívne blob URLs — pri zrušení/zatvorení detailu ich uvoľníme, aby sme nedržali pamäť.
-    var blobUrls = [];
+    // pdf.js worker je cross-origin (cdnjs) a v sandboxed iframe sa nemusí naloadovať.
+    // Cez `disableWorker: true` v getDocument() prebehne všetko na main threade.
+    // Pre úřední deska PDF (jednotky MB) je to akceptovateľne rýchle.
+    function ensurePdfJsReady() {
+        if (typeof window.pdfjsLib === 'undefined') {
+            return Promise.reject(new Error('pdf.js se nenačetl'));
+        }
+        return Promise.resolve();
+    }
+
+    // Vykreslí jednu PDF stránku na <canvas> v zadanej šírke (px).
+    function renderPdfPage(page, targetWidth) {
+        var unscaled = page.getViewport({ scale: 1 });
+        var scale = Math.max(0.5, targetWidth / unscaled.width);
+        // retina/HiDPI ostrosť
+        var dpr = Math.min(window.devicePixelRatio || 1, 2);
+        var viewport = page.getViewport({ scale: scale });
+
+        var canvas = document.createElement('canvas');
+        canvas.className = 'pdf-viewer__page';
+        canvas.width = Math.floor(viewport.width * dpr);
+        canvas.height = Math.floor(viewport.height * dpr);
+        canvas.style.width = viewport.width + 'px';
+        canvas.style.height = viewport.height + 'px';
+
+        var ctx = canvas.getContext('2d');
+        var renderTask = page.render({
+            canvasContext: ctx,
+            viewport: viewport,
+            transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : null
+        });
+        return { canvas: canvas, promise: renderTask.promise };
+    }
 
     function openPdfInline(fileRow) {
         var url = fileRow.getAttribute('data-file-url');
         if (!url) return;
         var btn = fileRow.querySelector('.js-open-pdf');
-        if (btn) { btn.disabled = true; btn.textContent = 'Načítám…'; }
 
+        // toggle: druhý klik zavrie už otvorený viewer
         var existing = fileRow.nextElementSibling;
         if (existing && existing.classList && existing.classList.contains('pdf-viewer')) {
-            // toggle: druhý klik zatvorí
             existing.parentNode.removeChild(existing);
             if (btn) { btn.disabled = false; btn.textContent = 'Otevřít'; }
             return;
         }
 
-        fetch(url, { cache: 'no-store' })
+        if (btn) { btn.disabled = true; btn.textContent = 'Načítám…'; }
+
+        var viewer = document.createElement('div');
+        viewer.className = 'pdf-viewer';
+        viewer.innerHTML = '<div class="pdf-viewer__status">Načítám PDF…</div>';
+        fileRow.parentNode.insertBefore(viewer, fileRow.nextSibling);
+
+        ensurePdfJsReady()
+            .then(function () { return fetch(url, { cache: 'no-store' }); })
             .then(function (r) {
                 if (!r.ok) throw new Error('HTTP ' + r.status);
-                return r.blob();
+                return r.arrayBuffer();
             })
-            .then(function (blob) {
-                var blobUrl = URL.createObjectURL(blob);
-                blobUrls.push(blobUrl);
-                var iframe = document.createElement('iframe');
-                iframe.className = 'pdf-viewer';
-                iframe.src = blobUrl;
-                iframe.title = 'Náhled PDF';
-                fileRow.parentNode.insertBefore(iframe, fileRow.nextSibling);
+            .then(function (buf) {
+                return window.pdfjsLib.getDocument({
+                    data: buf,
+                    disableWorker: true,
+                    disableAutoFetch: true,
+                    disableStream: true
+                }).promise;
+            })
+            .then(function (pdf) {
+                viewer.innerHTML = '';
+                var targetWidth = Math.max(280, viewer.clientWidth - 24);
+                var chain = Promise.resolve();
+                var loaded = 0;
+                var status = document.createElement('div');
+                status.className = 'pdf-viewer__status';
+                status.textContent = 'Vykresluji 0 / ' + pdf.numPages + ' stránek…';
+                viewer.appendChild(status);
+
+                for (var p = 1; p <= pdf.numPages; p++) {
+                    (function (pageNum) {
+                        chain = chain
+                            .then(function () { return pdf.getPage(pageNum); })
+                            .then(function (page) {
+                                var r = renderPdfPage(page, targetWidth);
+                                viewer.insertBefore(r.canvas, status);
+                                return r.promise;
+                            })
+                            .then(function () {
+                                loaded++;
+                                status.textContent = 'Vykresluji ' + loaded + ' / ' + pdf.numPages + ' stránek…';
+                            });
+                    })(p);
+                }
+                return chain.then(function () {
+                    status.remove();
+                });
+            })
+            .then(function () {
                 if (btn) { btn.disabled = false; btn.textContent = 'Skrýt'; }
             })
             .catch(function (err) {
-                var errEl = document.createElement('div');
-                errEl.className = 'detail__error';
-                errEl.style.marginTop = '8px';
-                errEl.textContent = 'Přílohu se nepodařilo načíst (' + err.message + ').';
-                fileRow.parentNode.insertBefore(errEl, fileRow.nextSibling);
+                viewer.innerHTML = '<div class="detail__error">Přílohu se nepodařilo načíst (' + (err && err.message ? err.message : err) + ').</div>';
                 if (btn) { btn.disabled = false; btn.textContent = 'Otevřít'; }
             });
     }
 
     function revokeBlobUrlsIn(container) {
-        var iframes = container.querySelectorAll('iframe.pdf-viewer');
-        iframes.forEach(function (f) {
-            try { URL.revokeObjectURL(f.src); } catch (_) {}
-        });
+        // pri novom rendere stránky odstraňujeme všetky otvorené PDF viewery (canvas-y, žiadne blob URL už nepoužívame)
+        var viewers = container.querySelectorAll('.pdf-viewer');
+        viewers.forEach(function (v) { v.remove(); });
     }
 
     function toggleDetail(item) {
